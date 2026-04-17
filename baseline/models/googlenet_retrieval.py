@@ -38,8 +38,9 @@ def build_encoder(variant: str = 'base', pool_mode: str = 'gap'):
         transform: Standard ImageNet preprocessing.
     """
     device   = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model    = tvm.googlenet(weights=tvm.GoogLeNet_Weights.DEFAULT,
-                             aux_logits=False)
+    # Load with default aux_logits=True, then disable to get plain tensor output
+    model    = tvm.googlenet(weights=tvm.GoogLeNet_Weights.DEFAULT)
+    model.aux_logits = False
     feat_dim = model.fc.in_features   # 1024
 
     model.avgpool = GeM() if pool_mode == 'gem' else nn.AdaptiveAvgPool2d((1, 1))
