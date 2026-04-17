@@ -46,15 +46,14 @@ class EfficientNetWithGeM(nn.Module):
 
     def __init__(self, variant: str = 'b3'):
         super().__init__()
-        base           = timm.create_model(f'efficientnet_{variant}',
+        self.backbone  = timm.create_model(f'efficientnet_{variant}',
                                            pretrained=True, num_classes=0)
-        self.features  = base.forward_features   # callable: x → feature map
         self.gem_pool  = GeM()
         self.feat_dim  = _FEAT_DIM[variant]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat_map = self.features(x)              # (N, C, H, W)
-        return self.gem_pool(feat_map)           # (N, D)
+        feat_map = self.backbone.forward_features(x)   # (N, C, H, W)
+        return self.gem_pool(feat_map)                 # (N, D)
 
     @torch.no_grad()
     def get_embedding(self, x: torch.Tensor) -> torch.Tensor:

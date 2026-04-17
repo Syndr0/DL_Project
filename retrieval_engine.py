@@ -192,6 +192,9 @@ def fine_tune(
                      unfreeze all parameters.
         last_layer_only: For GoogLeNet: only train last inception block.
     """
+    if backbone == 'clip' and lr == 5e-5:
+        lr = 1e-7   # CLIP needs a much smaller lr to avoid NaN loss
+
     if backbone == 'resnet':
         _fine_tune_resnet(model, fwd, feat_dim, num_classes, paths, labels,
                           tfm, epochs, lr, batch_size)
