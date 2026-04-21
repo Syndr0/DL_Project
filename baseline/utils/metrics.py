@@ -155,6 +155,68 @@ def precision_at_k(
     }
 
 
+def _map_from_topk(topk_idx, query_labels, gallery_labels, k_list):
+    """Shared mAP computation given top-k indices."""
+    from collections import Counter
+    topk_labels = torch.tensor(gallery_labels)[topk_idx]       # (M, max_k)
+    q_labels    = torch.tensor(query_labels).unsqueeze(1)       # (M, 1)
+    rel         = (topk_labels == q_labels).float()             # (M, max_k)
+
+    gallery_counts = Counter(
+        gallery_labels.tolist() if hasattr(gallery_labels, 'tolist') else list(gallery_labels)
+    )
+    n_rel = torch.tensor(
+        [gallery_counts[int(q)] for q in query_labels], dtype=torch.float
+    )
+
+    results = {}
+    for k in k_list:
+        rel_k = rel[:, :k]
+        cum   = rel_k.cumsum(dim=1)
+        ranks = torch.arange(1, k + 1, dtype=torch.float).unsqueeze(0)
+        prec  = cum / ranks
+        denom = n_rel.clamp(max=k, min=1e-6)
+        ap_k  = (prec * rel_k).sum(dim=1) / denom
+        results[k] = ap_k.mean().item()
+    return results
+
+
+def mean_average_precision(
+    query_embs:    torch.Tensor,
+    gallery_embs:  torch.Tensor,
+    query_labels:  np.ndarray,
+    gallery_labels: np.ndarray,
+    k_list:        Sequence[int] = (1, 5, 10),
+) -> dict:
+    """Mean Average Precision at K using cosine similarity.
+
+    AP@K = sum_{i=1}^{K} [P(i) * rel(i)] / min(R, K)
+    where R = number of relevant gallery items for that query.
+
+    Returns:
+        dict mapping each K → mAP@K  (float in [0, 1]).
+    """
+    topk_idx, _ = retrieve_top_k_cosine(query_embs, gallery_embs, max(k_list))
+    return _map_from_topk(topk_idx, query_labels, gallery_labels, k_list)
+
+
+def mean_average_precision_l2(
+    query_embs:    torch.Tensor,
+    gallery_embs:  torch.Tensor,
+    query_labels:  np.ndarray,
+    gallery_labels: np.ndarray,
+    k_list:        Sequence[int] = (1, 5, 10),
+    chunk_size:    int = 256,
+) -> dict:
+    """Mean Average Precision at K using L2 distance ranking.
+
+    Returns:
+        dict mapping each K → mAP@K  (float in [0, 1]).
+    """
+    topk_idx, _ = retrieve_top_k_l2(query_embs, gallery_embs, max(k_list), chunk_size)
+    return _map_from_topk(topk_idx, query_labels, gallery_labels, k_list)
+
+
 def top_k_accuracy(
     query_embs:    torch.Tensor,
     gallery_embs:  torch.Tensor,
