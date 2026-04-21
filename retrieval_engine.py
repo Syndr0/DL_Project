@@ -35,18 +35,17 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from baseline.models.clip_retrieval         import build_encoder as _clip
-from baseline.models.efficientnet_retrieval import build_encoder as _efficientnet
 from baseline.models.resnet_retrieval        import build_encoder as _resnet
 from baseline.models.googlenet_retrieval     import build_encoder as _googlenet
 from baseline.utils.dataset import _ImgDataset
+from baseline.utils.metrics import retrieve_top_k_cosine, retrieve_top_k_l2
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 _BUILDER = {
-    'clip':         _clip,
-    'efficientnet': _efficientnet,
-    'resnet':       _resnet,
-    'googlenet':    _googlenet,
+    'clip':      _clip,
+    'resnet':    _resnet,
+    'googlenet': _googlenet,
 }
 
 
@@ -457,3 +456,104 @@ def save_outputs(
     if precision_scores:
         for k, v in sorted(precision_scores.items()):
             print(f'  Precision@{k:2d}       : {v:.4f}')
+
+
+def save_outputs_dual(
+    out_dir,
+    gallery_embs:   torch.Tensor,
+    query_embs:     torch.Tensor,
+    gallery_paths:  Sequence,
+    query_paths:    Sequence,
+    gallery_labels: np.ndarray,
+    query_labels:   np.ndarray,
+    classes:        list,
+    topk_k:         int  = 50,
+    eval_cos:       dict = None,
+    eval_l2:        dict = None,
+    prec_cos:       dict = None,
+    prec_l2:        dict = None,
+    metadata:       dict = None,
+):
+    """Save Top-K retrieval artifacts ranked separately by cosine and L2.
+
+    Writes:
+        gallery_embeddings.pt          (N, D)
+        query_embeddings.pt            (M, D)
+        gallery_labels.npy             (N,)
+        query_labels.npy               (M,)
+        gallery_paths.json / query_paths.json
+        classes.json
+        topk_cosine_indices.npy        (M, k)  sorted by cosine sim (desc)
+        topk_cosine_scores.npy         (M, k)  cosine similarity
+        topk_l2_indices.npy            (M, k)  sorted by L2 dist (asc)
+        topk_l2_distances.npy          (M, k)  L2 distance
+        metadata.json
+
+    Args:
+        out_dir:        output directory (created if missing).
+        gallery_embs:   (N, D) L2-normalised gallery embeddings.
+        query_embs:     (M, D) L2-normalised query embeddings.
+        gallery_paths:  gallery image paths.
+        query_paths:    query image paths.
+        gallery_labels: integer class labels for gallery.
+        query_labels:   integer class labels for query.
+        classes:        list of class name strings.
+        topk_k:         candidates per query (default 50).
+        eval_cos:       Recall@K dict from cosine ranking.
+        eval_l2:        Recall@K dict from L2 ranking.
+        prec_cos:       Precision@K dict from cosine ranking.
+        prec_l2:        Precision@K dict from L2 ranking.
+        metadata:       extra key-value pairs for metadata.json.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cos_idx, cos_scores = retrieve_top_k_cosine(query_embs, gallery_embs, topk_k)
+    l2_idx,  l2_dists   = retrieve_top_k_l2(query_embs, gallery_embs, topk_k)
+
+    torch.save(gallery_embs, out_dir / 'gallery_embeddings.pt')
+    torch.save(query_embs,   out_dir / 'query_embeddings.pt')
+
+    np.save(out_dir / 'gallery_labels.npy',       gallery_labels)
+    np.save(out_dir / 'query_labels.npy',         query_labels)
+    np.save(out_dir / 'topk_cosine_indices.npy',  cos_idx)
+    np.save(out_dir / 'topk_cosine_scores.npy',   cos_scores)
+    np.save(out_dir / 'topk_l2_indices.npy',      l2_idx)
+    np.save(out_dir / 'topk_l2_distances.npy',    l2_dists)
+
+    with open(out_dir / 'gallery_paths.json', 'w') as f:
+        json.dump([str(p) for p in gallery_paths], f)
+    with open(out_dir / 'query_paths.json', 'w') as f:
+        json.dump([str(p) for p in query_paths], f)
+    with open(out_dir / 'classes.json', 'w') as f:
+        json.dump({c: i for i, c in enumerate(classes)}, f, indent=2)
+
+    meta = {
+        'n_gallery':    int(gallery_embs.shape[0]),
+        'n_query':      int(query_embs.shape[0]),
+        'feat_dim':     int(gallery_embs.shape[1]),
+        'topk_k':       topk_k,
+        'n_classes':    len(classes),
+        'ranking_mode': 'cosine_and_l2',
+    }
+    if eval_cos:
+        meta['recall_cosine']    = {f'@{k}': round(v, 4) for k, v in eval_cos.items()}
+    if eval_l2:
+        meta['recall_l2']        = {f'@{k}': round(v, 4) for k, v in eval_l2.items()}
+    if prec_cos:
+        meta['precision_cosine'] = {f'@{k}': round(v, 4) for k, v in prec_cos.items()}
+    if prec_l2:
+        meta['precision_l2']     = {f'@{k}': round(v, 4) for k, v in prec_l2.items()}
+    if metadata:
+        meta.update(metadata)
+
+    with open(out_dir / 'metadata.json', 'w') as f:
+        json.dump(meta, f, indent=2)
+
+    print(f'Outputs saved to {out_dir}/')
+    print(f'  topk_cosine_indices : {cos_idx.shape}  (Top-{topk_k} by cosine)')
+    print(f'  topk_l2_indices     : {l2_idx.shape}   (Top-{topk_k} by L2)')
+    if eval_cos:
+        for k, v in sorted(eval_cos.items()):
+            l2v = eval_l2.get(k, float('nan')) if eval_l2 else float('nan')
+            print(f'  Recall@{k:2d}  cosine: {v:.4f}   L2: {l2v:.4f}')

@@ -44,6 +44,51 @@ def build_dataset_split(data_dir, train_ratio: float = 0.7):
             classes)
 
 
+def build_stanford_split(data_dir):
+    """Load Stanford Online Products dataset using official train/test split.
+
+    Reads Ebay_train.txt (gallery) and Ebay_test.txt (query) from data_dir.
+    Images live in category subdirectories referenced by the text files.
+
+    Args:
+        data_dir: Root containing Ebay_train.txt, Ebay_test.txt, and image dirs.
+
+    Returns:
+        gallery_paths  : list[Path]
+        gallery_labels : np.ndarray  (0-indexed integer class labels)
+        query_paths    : list[Path]
+        query_labels   : np.ndarray
+        classes        : list[str]   (index == label)
+    """
+    data_dir = Path(data_dir)
+
+    def _load_txt(txt_path):
+        paths, labels = [], []
+        with open(txt_path) as f:
+            next(f)  # skip header line
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                img_path = data_dir / parts[3]
+                if img_path.exists():
+                    paths.append(img_path)
+                    labels.append(int(parts[1]))
+        return paths, labels
+
+    gallery_paths, gallery_raw = _load_txt(data_dir / 'Ebay_train.txt')
+    query_paths,   query_raw   = _load_txt(data_dir / 'Ebay_test.txt')
+
+    all_cls = sorted(set(gallery_raw) | set(query_raw))
+    cls2idx = {c: i for i, c in enumerate(all_cls)}
+
+    gallery_labels = np.array([cls2idx[l] for l in gallery_raw])
+    query_labels   = np.array([cls2idx[l] for l in query_raw])
+    classes        = [str(c) for c in all_cls]
+
+    return gallery_paths, gallery_labels, query_paths, query_labels, classes
+
+
 class _ImgDataset(Dataset):
     """Minimal image dataset for fine-tuning DataLoader."""
 
