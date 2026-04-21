@@ -44,17 +44,17 @@ def build_dataset_split(data_dir, train_ratio: float = 0.7):
             classes)
 
 
-def build_stanford_split(data_dir):
+def build_stanford_split(data_dir, train_ratio: float = 0.7):
     """Load Stanford Online Products dataset for retrieval evaluation.
 
-    Train and test sets have completely disjoint class IDs, so using train as
-    gallery and test as query gives 0 recall. Instead this function uses only
-    the test split: for each class the first image becomes the query and the
-    remaining images become the gallery. Classes with only one image are placed
-    in the gallery only.
+    Train and test sets have completely disjoint class IDs, so this function
+    uses only the test split and applies the same per-class gallery/query
+    split as build_dataset_split: first train_ratio images → gallery,
+    remaining → query.  Images within each class are sorted by filename.
 
     Args:
-        data_dir: Root containing Ebay_test.txt and image subdirectories.
+        data_dir:    Root containing Ebay_test.txt and image subdirectories.
+        train_ratio: Fraction of each class to put in the gallery (default 0.7).
 
     Returns:
         gallery_paths  : list[Path]
@@ -85,17 +85,15 @@ def build_stanford_split(data_dir):
     query_paths,   query_labels   = [], []
 
     for cls in all_cls:
-        imgs = cls_images[cls]
-        idx  = cls2idx[cls]
-        if len(imgs) >= 2:
-            query_paths.append(imgs[0])
-            query_labels.append(idx)
-            for img in imgs[1:]:
-                gallery_paths.append(img)
-                gallery_labels.append(idx)
-        else:
-            gallery_paths.append(imgs[0])
+        imgs  = sorted(cls_images[cls])
+        idx   = cls2idx[cls]
+        split = max(1, int(len(imgs) * train_ratio))
+        for img in imgs[:split]:
+            gallery_paths.append(img)
             gallery_labels.append(idx)
+        for img in imgs[split:]:
+            query_paths.append(img)
+            query_labels.append(idx)
 
     return (gallery_paths, np.array(gallery_labels),
             query_paths,   np.array(query_labels),
