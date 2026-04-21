@@ -235,6 +235,28 @@ def fine_tune(
 
 # ── Embedding extraction ──────────────────────────────────────────────────────
 
+def extract_all_raw(paths: Sequence, fwd, tfm, batch_size: int = 64) -> torch.Tensor:
+    """Extract raw (non-normalised) embeddings for all images.
+
+    Args:
+        paths:      iterable of image file paths.
+        fwd:        differentiable forward fn returned by build_encoder.
+        tfm:        preprocessing transform returned by build_encoder.
+        batch_size: images per forward pass.
+
+    Returns:
+        Tensor of shape (N, D) — NOT L2-normalised.
+    """
+    chunks = []
+    paths  = list(paths)
+    for i in tqdm(range(0, len(paths), batch_size), desc='Extracting raw embeddings'):
+        imgs = [Image.open(p).convert('RGB') for p in paths[i:i + batch_size]]
+        x    = torch.stack([tfm(img) for img in imgs]).to(device)
+        with torch.no_grad():
+            chunks.append(fwd(x).cpu())
+    return torch.cat(chunks)
+
+
 def extract_all(paths: Sequence, encode_fn, batch_size: int = 64) -> torch.Tensor:
     """Extract L2-normalised embeddings for all images.
 
@@ -460,19 +482,21 @@ def save_outputs(
 
 def save_outputs_dual(
     out_dir,
-    gallery_embs:   torch.Tensor,
-    query_embs:     torch.Tensor,
-    gallery_paths:  Sequence,
-    query_paths:    Sequence,
-    gallery_labels: np.ndarray,
-    query_labels:   np.ndarray,
-    classes:        list,
-    topk_k:         int  = 50,
-    eval_cos:       dict = None,
-    eval_l2:        dict = None,
-    prec_cos:       dict = None,
-    prec_l2:        dict = None,
-    metadata:       dict = None,
+    gallery_embs:     torch.Tensor,
+    query_embs:       torch.Tensor,
+    gallery_paths:    Sequence,
+    query_paths:      Sequence,
+    gallery_labels:   np.ndarray,
+    query_labels:     np.ndarray,
+    classes:          list,
+    topk_k:           int          = 50,
+    gallery_embs_raw: torch.Tensor = None,
+    query_embs_raw:   torch.Tensor = None,
+    eval_cos:         dict         = None,
+    eval_l2:          dict         = None,
+    prec_cos:         dict         = None,
+    prec_l2:          dict         = None,
+    metadata:         dict         = None,
 ):
     """Save Top-K retrieval artifacts ranked separately by cosine and L2.
 
@@ -509,7 +533,9 @@ def save_outputs_dual(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cos_idx, cos_scores = retrieve_top_k_cosine(query_embs, gallery_embs, topk_k)
-    l2_idx,  l2_dists   = retrieve_top_k_l2(query_embs, gallery_embs, topk_k)
+    _q_l2 = query_embs_raw   if query_embs_raw   is not None else query_embs
+    _g_l2 = gallery_embs_raw if gallery_embs_raw is not None else gallery_embs
+    l2_idx,  l2_dists   = retrieve_top_k_l2(_q_l2, _g_l2, topk_k)
 
     torch.save(gallery_embs, out_dir / 'gallery_embeddings.pt')
     torch.save(query_embs,   out_dir / 'query_embeddings.pt')
