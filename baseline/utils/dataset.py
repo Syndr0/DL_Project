@@ -44,6 +44,42 @@ def build_dataset_split(data_dir, train_ratio: float = 0.7):
             classes)
 
 
+def build_stanford_train(data_dir):
+    """Load SOP train split (Ebay_train.txt) for contrastive fine-tuning.
+
+    Classes are completely disjoint from the test split, making this a proper
+    metric learning setup: fine-tune on train classes, evaluate on unseen test classes.
+
+    Args:
+        data_dir: Root containing Ebay_train.txt and image subdirectories.
+
+    Returns:
+        train_paths  : list[Path]
+        train_labels : np.ndarray  (0-indexed integer class labels)
+        classes      : list[str]   (index == label)
+    """
+    data_dir = Path(data_dir)
+    paths, raw_labels = [], []
+
+    with open(data_dir / 'Ebay_train.txt') as f:
+        next(f)
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 4:
+                continue
+            img_path = data_dir / parts[3]
+            if img_path.exists():
+                paths.append(img_path)
+                raw_labels.append(int(parts[1]))
+
+    all_cls = sorted(set(raw_labels))
+    cls2idx = {c: i for i, c in enumerate(all_cls)}
+    labels  = np.array([cls2idx[l] for l in raw_labels])
+    classes = [str(c) for c in all_cls]
+
+    return paths, labels, classes
+
+
 def build_stanford_split(data_dir, train_ratio: float = 0.7):
     """Load Stanford Online Products dataset for retrieval evaluation.
 

@@ -31,21 +31,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from PIL import Image
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
 
 from baseline.models.clip_retrieval         import build_encoder as _clip
 from baseline.models.resnet_retrieval        import build_encoder as _resnet
 from baseline.models.googlenet_retrieval     import build_encoder as _googlenet
+from baseline.models.resnet_sop             import build_encoder as _resnet_sop, _TRAIN_TFM as _SOP_TRAIN_TFM
 from baseline.utils.dataset import _ImgDataset
 from baseline.utils.metrics import retrieve_top_k_cosine, retrieve_top_k_l2
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 _BUILDER = {
-    'clip':      _clip,
-    'resnet':    _resnet,
-    'googlenet': _googlenet,
+    'clip':       _clip,
+    'resnet':     _resnet,
+    'googlenet':  _googlenet,
+    'resnet_sop': _resnet_sop,
 }
 
 
@@ -227,6 +229,132 @@ def fine_tune(
             optimizer.zero_grad(); loss.backward(); optimizer.step()
             total += loss.item()
         print(f'  Epoch {ep+1}/{epochs}  loss {total/len(loader):.4f}')
+
+    for p in model.parameters():
+        p.requires_grad = False
+    model.eval()
+
+
+# ── Contrastive fine-tuning ───────────────────────────────────────────────────
+
+class _BalancedBatchSampler(Sampler):
+    """Yields batches of P*K indices: P random classes, K images each."""
+
+    def __init__(self, labels: np.ndarray, P: int = 32, K: int = 4):
+        self.labels = labels
+        self.P = P
+        self.K = K
+        from collections import defaultdict
+        self._cls_indices = defaultdict(list)
+        for i, lbl in enumerate(labels):
+            self._cls_indices[int(lbl)].append(i)
+        self._classes = [c for c, ids in self._cls_indices.items() if len(ids) >= 2]
+
+    def __len__(self):
+        return len(self._classes) * self.K // (self.P * self.K)
+
+    def __iter__(self):
+        classes = self._classes.copy()
+        np.random.shuffle(classes)
+        for start in range(0, len(classes) - self.P + 1, self.P):
+            batch = []
+            for cls in classes[start:start + self.P]:
+                pool = self._cls_indices[cls]
+                chosen = np.random.choice(pool, size=min(self.K, len(pool)), replace=len(pool) < self.K)
+                batch.extend(chosen.tolist())
+            yield batch
+
+
+def _supervised_contrastive_loss(embs: torch.Tensor, labels: torch.Tensor, temperature: float = 0.05) -> torch.Tensor:
+    """SupCon loss: InfoNCE with all positives in batch as targets."""
+    embs   = F.normalize(embs, dim=-1)
+    sim    = embs @ embs.T / temperature          # (N, N)
+    N      = embs.shape[0]
+    mask   = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()  # (N, N)
+    self_m = torch.eye(N, device=embs.device)
+    mask   = mask - self_m                        # exclude self
+
+    exp_sim = torch.exp(sim - sim.max(dim=1, keepdim=True).values.detach())
+    exp_sim = exp_sim * (1 - self_m)              # exclude self from denominator
+    log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+    n_pos = mask.sum(dim=1).clamp(min=1)
+    loss  = -(mask * log_prob).sum(dim=1) / n_pos
+    return loss.mean()
+
+
+def fine_tune_contrastive(
+    model,
+    fwd,
+    paths:       Sequence,
+    labels:      np.ndarray,
+    tfm,
+    epochs:      int   = 30,
+    lr:          float = 1e-4,
+    P:           int   = 32,
+    K:           int   = 4,
+    temperature: float = 0.05,
+    warmup_epochs: int = 2,
+):
+    """Supervised contrastive fine-tuning for metric learning.
+
+    Uses balanced P×K batch sampling and SupCon loss with in-batch negatives.
+    Updates model in-place; leaves model in eval mode when done.
+
+    Args:
+        model:         nn.Module from build_encoder (e.g. ResNetSOP).
+        fwd:           differentiable forward fn (model's fwd closure).
+        paths:         training image paths (Ebay_train.txt items).
+        labels:        integer class labels (0-indexed).
+        tfm:           training transform (use _SOP_TRAIN_TFM).
+        epochs:        training epochs (default 30).
+        lr:            Adam learning rate (default 1e-4).
+        P:             classes per batch (default 32).
+        K:             images per class per batch (default 4).
+        temperature:   SupCon temperature τ (default 0.05).
+        warmup_epochs: epochs with frozen backbone (projection head only).
+    """
+    labels = np.array(labels)
+    dataset = _ImgDataset(paths, labels, tfm)
+    sampler = _BalancedBatchSampler(labels, P=P, K=K)
+
+    loader = DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in model.proj.parameters():
+        p.requires_grad = True
+
+    optimizer = optim.Adam(model.proj.parameters(), lr=lr)
+
+    for ep in range(epochs):
+        if ep == warmup_epochs:
+            for p in model.backbone.layer4.parameters():
+                p.requires_grad = True
+            optimizer = optim.Adam(
+                list(model.backbone.layer4.parameters()) + list(model.proj.parameters()),
+                lr=lr * 0.1,
+            )
+
+        model.train()
+        total, n_batches = 0.0, 0
+        for imgs, lbls in tqdm(loader, desc=f'ContrastiveEpoch {ep+1}/{epochs}', leave=False):
+            imgs = imgs.to(device)
+            lbls = lbls.to(device)
+            embs = fwd(imgs)
+            loss = _supervised_contrastive_loss(embs, lbls, temperature)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total    += loss.item()
+            n_batches += 1
+
+        print(f'  Epoch {ep+1}/{epochs}  loss {total / max(n_batches, 1):.4f}')
 
     for p in model.parameters():
         p.requires_grad = False
